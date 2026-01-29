@@ -13,207 +13,154 @@
 
 ## 🚀 Установка и Запуск
 
-### 1. Требования
+1.  **Установка зависимостей:**
+    ```bash
+    npm install
+    ```
 
-* Node.js (v14 или выше)
-* NPM
-
-### 2. Установка зависимостей
-
-Перейдите в папку с сервером и выполните:
-
-```bash
-npm install
-
-```
-
-*Если вы создаете проект с нуля, убедитесь, что установлены пакеты:*
-`express`, `socket.io`, `sqlite3`, `bcryptjs`, `jsonwebtoken`, `cors`, `uuid`.
-
-### 3. Запуск сервера
-
-```bash
-node index.js
-
-```
-
-Сервер запустится по адресу: `http://localhost:3000`
-База данных `database.sqlite` будет создана автоматически при первом запуске.
+2.  **Запуск сервера:**
+    ```bash
+    node index.js
+    ```
+    Сервер запустится по адресу: `http://localhost:3000`
 
 ---
 
-## 🔑 Правила запросов (Headers)
+## 🔑 Обязательные HTTP Заголовки (Headers)
 
-Для **всех** HTTP запросов необходимо передавать следующие заголовки:
+В этом API используются строгие правила валидации заголовков.
+**Любой HTTP запрос** должен содержать как минимум первые два заголовка.
 
-1. **Content-Type:** `application/json`
-2. **ClientId:** `<Ваш_Логин>` (Обязательно по ТЗ, например: `IvanDev`)
+| Заголовок | Значение | Где обязателен? | Описание |
+| :--- | :--- | :--- | :--- |
+| **Content-Type** | `application/json` | **Все запросы** | Указывает формат данных. |
+| **ClientId** | `<Ваш_Логин>` | **Все запросы** | Ваш идентификатор (по ТЗ). Например: `IvanDev`. |
+| **Authorization** | `Bearer <Token>` | **Приватные запросы** | Токен, полученный при логине. Нужен для действий внутри личного кабинета. |
 
-Для **защищенных** маршрутов (все, кроме регистрации/логина и публичных досок) добавьте:
-
-3. **Authorization:** `Bearer <ВАШ_ТОКЕН>`
+> ⚠️ **Важно:** Если вы не передадите заголовок `ClientId`, сервер вернет ошибку `400 Missing ClientId header`.
 
 ---
 
 ## 📚 REST API Документация
 
-### 👤 Аутентификация
+### 👤 1. Аутентификация
 
-#### 1. Регистрация
-
-* **URL:** `POST /api/auth/register`
+#### Регистрация
+* **Метод:** `POST`
+* **URL:** `/api/auth/register`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
 * **Body:**
-```json
-{
-  "email": "user@example.com",
-  "name": "Alex",
-  "password": "Password123!" 
-}
+    ```json
+    {
+      "email": "user@example.com",
+      "name": "Alex",
+      "password": "Password123!"
+    }
+    ```
 
-```
-
-
-*(Пароль: минимум 8 символов, цифры + спецсимволы)*
-
-#### 2. Вход (Логин)
-
-* **URL:** `POST /api/auth/login`
+#### Вход (Логин)
+* **Метод:** `POST`
+* **URL:** `/api/auth/login`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
 * **Body:**
-```json
-{ "email": "user@example.com", "password": "Password123!" }
-
-```
-
-
-* **Ответ:** Возвращает `token` и данные пользователя.
+    ```json
+    {
+      "email": "user@example.com",
+      "password": "Password123!"
+    }
+    ```
+* **Ответ:** `{ "token": "...", "user": {...} }`. Сохраните `token` для следующих запросов.
 
 ---
 
-### 📋 Управление досками
+### 📋 2. Управление досками (Dashboard)
 
-#### 3. Получить список моих досок
+#### Получить список моих досок
+* **Метод:** `GET`
+* **URL:** `/api/boards`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
+    * `Authorization: Bearer <Ваш_Токен>`
 
-* **URL:** `GET /api/boards`
-* **Headers:** `Authorization: Bearer ...`
-* **Описание:** Возвращает доски, созданные пользователем + доски, доступные ему.
-
-#### 4. Создать доску
-
-* **URL:** `POST /api/boards`
-* **Headers:** `Authorization: Bearer ...`
+#### Создать новую доску
+* **Метод:** `POST`
+* **URL:** `/api/boards`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
+    * `Authorization: Bearer <Ваш_Токен>`
 * **Body:**
-```json
-{ "title": "My Project Board" }
+    ```json
+    { "title": "My New Project" }
+    ```
 
-```
-
-
-
-#### 5. Получить данные доски (Приватная)
-
-* **URL:** `GET /api/boards/:id`
-* **Headers:** `Authorization: Bearer ...`
-* **Ответ:** Возвращает объект доски и массив `elements` (содержимое холста).
-
-#### 6. Получить публичную доску (Гостевой доступ)
-
-* **URL:** `GET /board/:hash`
-* **Headers:** `Authorization` **не требуется**.
-* **Описание:** Доступ по уникальному хешу для публичных досок.
-
-#### 7. Список всех публичных досок
-
-* **URL:** `GET /api/boards/public`
-* **Query Params:** `?sort=likes` (сортировка по популярности).
+#### Получить полную информацию о доске (для входа на холст)
+* **Метод:** `GET`
+* **URL:** `/api/boards/:id`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
+    * `Authorization: Bearer <Ваш_Токен>`
+* **Ответ:** Возвращает объект доски и массив `elements` (JSON с объектами холста).
 
 ---
 
-### ❤️ Социальные функции
+### 🌐 3. Публичный доступ и Социальное
 
-#### 8. Предоставить доступ (Share)
+#### Список всех публичных досок
+* **Метод:** `GET`
+* **URL:** `/api/boards/public?sort=likes`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
+* **Authorization:** НЕ требуется.
 
-* **URL:** `POST /api/boards/:id/share`
-* **Headers:** `Authorization: Bearer ...`
+#### Просмотр публичной доски (Гостевой доступ)
+* **Метод:** `GET`
+* **URL:** `/board/:hash`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
+* **Authorization:** НЕ требуется.
+* **Описание:** Доступ по уникальному хешу (поле `hash` из объекта доски).
+
+#### Предоставить доступ другу (Share)
+* **Метод:** `POST`
+* **URL:** `/api/boards/:id/share`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
+    * `Authorization: Bearer <Ваш_Токен>`
 * **Body:**
-```json
-{ "email": "friend@example.com" }
+    ```json
+    { "email": "friend@example.com" }
+    ```
 
-```
-
-
-
-#### 9. Поставить лайк
-
-* **URL:** `POST /api/boards/:id/like`
-* **Headers:** `Authorization: Bearer ...`
+#### Поставить лайк
+* **Метод:** `POST`
+* **URL:** `/api/boards/:id/like`
+* **Headers:**
+    * `Content-Type: application/json`
+    * `ClientId: <Ваш_Логин>`
+    * `Authorization: Bearer <Ваш_Токен>`
 
 ---
 
-## ⚡ WebSocket API (Socket.io)
+## ⚡ WebSocket API (Real-time)
 
-**Endpoint:** `ws://localhost:3000`
+**URL:** `ws://localhost:3000`
 
-### Подключение
-
-При инициализации соединения передайте токен в объекте `auth`.
+### Подключение (Handshake)
+При подключении необходимо передать токен авторизации внутри объекта `auth`.
 
 ```javascript
 const socket = io("http://localhost:3000", {
   auth: {
-    token: "ВАШ_JWT_ТОКЕН" 
+    token: "ВАШ_JWT_ТОКЕН" // Если не передать, сервер присвоит имя "Guest"
   }
 });
-// Для гостей токен не передается, сервер присвоит имя "Guest".
-
-```
-
-### Формат объекта "Element" (Пример)
-
-```json
-{
-  "id": "uuid-v4",
-  "type": "rect", 
-  "x": 100,
-  "y": 200,
-  "width": 150,
-  "height": 100,
-  "content": "HexColor or Text",
-  "rotation": 0
-}
-
-```
-
-*Важно: Сервер проверяет, чтобы объект не выходил за границы 1600x900.*
-
-### События от Клиента (Отправляем на сервер)
-
-| Событие | Payload (Data) | Описание |
-| --- | --- | --- |
-| `JOIN_BOARD` | `{ "board_id": 1 }` | Вход в комнату доски. Обязательно первым действием. |
-| `REQUEST_FOCUS` | `{ "board_id": 1, "element_id": "xyz" }` | Попытка захватить объект для редактирования. |
-| `RELEASE_FOCUS` | `{ "board_id": 1, "element_id": "xyz", "element_data": {...} }` | Завершение редактирования. Сохраняет данные в БД. |
-| `ADD_ELEMENT` | `{ "board_id": 1, "element": {...} }` | Создание нового объекта. |
-
-### События от Сервера (Слушаем на клиенте)
-
-| Событие | Payload (Data) | Описание |
-| --- | --- | --- |
-| `CURRENT_FOCUSES` | `{ "el_id": { "userName": "Ivan" } }` | Приходит при входе. Список занятых сейчас объектов. |
-| `FOCUS_TAKEN` | `{ "element_id": "xyz", "user_name": "Alex" }` | Кто-то другой начал редактировать объект. Заблокируйте его у себя. |
-| `FOCUS_RELEASED` | `{ "element_id": "xyz" }` | Объект освободился. Снимите блокировку. |
-| `ELEMENT_UPDATED` | `{ "element_id": "xyz", "element_data": {...} }` | Объект изменился. Обновите его на канвасе. |
-| `ELEMENT_CREATED` | `{ "element": {...} }` | Кто-то создал новый объект. Добавьте его. |
-| `ERROR` | `{ "message": "..." }` | Ошибка (например, выход за границы холста). |
-
----
-
-## 🛠 Структура БД (SQLite)
-
-Файл базы данных: `database.sqlite` (создается в корне).
-
-**Таблицы:**
-
-1. `users` (id, email, name, password_hash)
-2. `boards` (id, title, owner_id, hash, is_public, content JSON)
-3. `board_access` (связь board_id <-> user_email)
-4. `likes` (связь user_id <-> board_id)
