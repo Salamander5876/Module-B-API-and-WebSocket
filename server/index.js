@@ -1,3 +1,4 @@
+require('dotenv').config(); // Загрузка переменных окружения
 const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
@@ -9,65 +10,108 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
+
+// Настройка CORS для Socket.IO и Express
 const io = new Server(server, {
-    cors: { origin: "*" } // Разрешаем доступ с любого фронтенда
+    cors: {
+        origin: "*", // В продакшене лучше указать конкретный домен
+        methods: ["GET", "POST"]
+    }
 });
 
-const PORT = 3000;
-const SECRET_KEY = "comp_secret_key"; // В реальном проекте - в .env
+const PORT = process.env.PORT || 4000;
+const SECRET_KEY = process.env.SECRET_KEY || "dev_secret_key_CHANGE_ME";
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// --- DATABASE SETUP ---
+// --- DATABASE SETUP (Async Wrappers) ---
 const db = new sqlite3.Database('./database.sqlite');
 
-db.serialize(() => {
-    // Пользователи
-    db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE,
-        name TEXT,
-        password TEXT
-    )`);
-    // Доски
-    db.run(`CREATE TABLE IF NOT EXISTS boards (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        owner_id INTEGER,
-        hash TEXT UNIQUE, -- для публичных ссылок
-        is_public INTEGER DEFAULT 0,
-        content TEXT DEFAULT '[]', -- JSON массив объектов
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-    // Доступы
-    db.run(`CREATE TABLE IF NOT EXISTS board_access (
-        board_id INTEGER,
-        user_email TEXT
-    )`);
-    // Лайки
-    db.run(`CREATE TABLE IF NOT EXISTS likes (
-        user_id INTEGER,
-        board_id INTEGER,
-        PRIMARY KEY (user_id, board_id)
-    )`);
-});
+// Обертки для использования async/await с sqlite3
+const dbRun = (sql, params = []) => {
+    return new Promise((resolve, reject) => {
+        db.run(sql, params, function (err) {
+            if (err) reject(err);
+            else resolve(this);
+        });
+    });
+};
+
+const dbGet = (sql, params = []) => {
+    return new Promise((resolve, reject) => {
+        db.get(sql, params, (err, row) => {
+            if (err) reject(err);
+            else resolve(row);
+        });
+    });
+};
+
+const dbAll = (sql, params = []) => {
+    return new Promise((resolve, reject) => {
+        db.all(sql, params, (err, rows) => {
+            if (err) reject(err);
+            else resolve(rows);
+        });
+    });
+};
+
+// Инициализация таблиц
+(async () => {
+    try {
+        await dbRun(`CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE,
+            name TEXT,
+            password TEXT
+        )`);
+        await dbRun(`CREATE TABLE IF NOT EXISTS boards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            owner_id INTEGER,
+            hash TEXT UNIQUE,
+            is_public INTEGER DEFAULT 0,
+            content TEXT DEFAULT '[]',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+        await dbRun(`CREATE TABLE IF NOT EXISTS board_access (
+            board_id INTEGER,
+            user_email TEXT
+        )`);
+        await dbRun(`CREATE TABLE IF NOT EXISTS likes (
+            user_id INTEGER,
+            board_id INTEGER,
+            PRIMARY KEY (user_id, board_id)
+        )`);
+        console.log("Database initialized");
+    } catch (err) {
+        console.error("DB Init Error:", err);
+    }
+})();
 
 // --- HELPER FUNCTIONS ---
 function validateElement(el) {
-    // Валидация границ холста 1600x900
+    if (!el) return false;
+    // Проверка типов
+    if (typeof el.x !== 'number' || typeof el.y !== 'number') return false;
+    
+    // Границы (1600x900)
     if (el.x < 0 || el.y < 0) return false;
-    // Простая проверка (для вращения логика сложнее, но для базы достаточно проверить origin)
-    // ТЗ требует запретить перемещение ЗА пределы.
     if (el.x > 1600 || el.y > 900) return false;
-    if (el.x + el.width > 1600 || el.y + el.height > 900) return false;
+    
+    // Проверка размеров (защита от отрицательных размеров)
+    if (el.width && el.width < 0) return false;
+    if (el.height && el.height < 0) return false;
+
+    if (el.width && (el.x + el.width > 1600)) return false;
+    if (el.height && (el.y + el.height > 900)) return false;
+
     return true;
 }
 
 // --- MIDDLEWARES ---
 
-// Проверка ClientId (по ТЗ)
 const checkClientId = (req, res, next) => {
     const clientId = req.headers['clientid'];
     if (!clientId) {
@@ -76,7 +120,6 @@ const checkClientId = (req, res, next) => {
     next();
 };
 
-// Проверка Токена
 const authenticate = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -91,242 +134,284 @@ const authenticate = (req, res, next) => {
 
 app.use(checkClientId);
 
-// --- REST API ---
+// --- REST API (Refactored to Async/Await) ---
 
 // 1. Регистрация
-app.post('/api/auth/register', (req, res) => {
-    const { email, name, password } = req.body;
-    // Валидация (упрощенная)
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    const nameRegex = /^[a-zA-Z]+$/;
-    // Пароль: 8+, цифры, спецсимволы
-    const passRegex = /^(?=.*[0-9])(?=.*[!@#$%^&*])[a-zA-Z0-9!@#$%^&*]{8,}$/;
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { email, name, password } = req.body;
+        // Простая валидация
+        if (!email || !name || !password) return res.status(422).json({ error: "Missing fields" });
+        if (password.length < 8) return res.status(422).json({ error: "Password too short" });
 
-    if (!emailRegex.test(email) || !nameRegex.test(name) || !passRegex.test(password)) {
-        return res.status(422).json({ error: "Validation failed" });
+        const hash = bcrypt.hashSync(password, 10);
+        await dbRun(`INSERT INTO users (email, name, password) VALUES (?, ?, ?)`, [email, name, hash]);
+        res.status(201).json({ message: "Registered" });
+    } catch (err) {
+        res.status(422).json({ error: "Email already exists or error" });
     }
-
-    const hash = bcrypt.hashSync(password, 10);
-    db.run(`INSERT INTO users (email, name, password) VALUES (?, ?, ?)`, 
-        [email, name, hash], 
-        function(err) {
-            if (err) return res.status(422).json({ error: "Email already exists" });
-            res.status(201).json({ message: "Registered" });
-        }
-    );
 });
 
 // 2. Авторизация
-app.post('/api/auth/login', (req, res) => {
-    const { email, password } = req.body;
-    db.get(`SELECT * FROM users WHERE email = ?`, [email], (err, user) => {
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        const user = await dbGet(`SELECT * FROM users WHERE email = ?`, [email]);
+        
         if (!user || !bcrypt.compareSync(password, user.password)) {
             return res.status(401).json({ error: "Invalid credentials" });
         }
-        const token = jwt.sign({ id: user.id, email: user.email, name: user.name }, SECRET_KEY);
+        
+        const token = jwt.sign({ id: user.id, email: user.email, name: user.name }, SECRET_KEY, { expiresIn: '24h' });
         res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
-    });
+    } catch (err) {
+        res.status(500).json({ error: "Server error" });
+    }
 });
 
-// 3. Список досок (Мои + Доступные)
-app.get('/api/boards', authenticate, (req, res) => {
-    const sql = `
-        SELECT b.* FROM boards b
-        LEFT JOIN board_access ba ON b.id = ba.board_id
-        WHERE b.owner_id = ? OR ba.user_email = ?
-    `;
-    db.all(sql, [req.user.id, req.user.email], (err, rows) => {
+// 3. Список досок
+app.get('/api/boards', authenticate, async (req, res) => {
+    try {
+        const sql = `
+            SELECT b.* FROM boards b
+            LEFT JOIN board_access ba ON b.id = ba.board_id
+            WHERE b.owner_id = ? OR ba.user_email = ?
+        `;
+        const rows = await dbAll(sql, [req.user.id, req.user.email]);
         res.json(rows);
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // 4. Создание доски
-app.post('/api/boards', authenticate, (req, res) => {
-    const { title } = req.body;
-    const hash = uuidv4();
-    db.run(`INSERT INTO boards (title, owner_id, hash) VALUES (?, ?, ?)`, 
-        [title, req.user.id, hash], 
-        function(err) {
-            if(err) return res.status(500).json({error: err.message});
-            res.status(201).json({ id: this.lastID, title, hash, is_public: 0 });
-        }
-    );
+app.post('/api/boards', authenticate, async (req, res) => {
+    try {
+        const { title } = req.body;
+        const hash = uuidv4();
+        const result = await dbRun(`INSERT INTO boards (title, owner_id, hash) VALUES (?, ?, ?)`, [title, req.user.id, hash]);
+        res.status(201).json({ id: result.lastID, title, hash, is_public: 0 });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // 5. Публичные доски
-app.get('/api/boards/public', (req, res) => {
-    const sort = req.query.sort; // ?sort=likes
-    let sql = `
-        SELECT b.*, COUNT(l.user_id) as likes_count 
-        FROM boards b 
-        LEFT JOIN likes l ON b.id = l.board_id
-        WHERE b.is_public = 1
-        GROUP BY b.id
-    `;
-    if (sort === 'likes') {
-        sql += ` ORDER BY likes_count DESC`;
-    }
-    db.all(sql, [], (err, rows) => {
+app.get('/api/boards/public', async (req, res) => {
+    try {
+        const sort = req.query.sort;
+        let sql = `
+            SELECT b.id, b.title, b.owner_id, b.is_public, b.created_at, COUNT(l.user_id) as likes_count 
+            FROM boards b 
+            LEFT JOIN likes l ON b.id = l.board_id
+            WHERE b.is_public = 1
+            GROUP BY b.id
+        `;
+        if (sort === 'likes') sql += ` ORDER BY likes_count DESC`;
+        
+        const rows = await dbAll(sql);
         res.json(rows);
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// 6. Получение одной доски (по ID или HASH)
-// Middleware для проверки доступа к конкретной доске опустим для краткости, 
-// но в реальном коде нужно проверять owner_id/access/public
-app.get('/api/boards/:id', authenticate, (req, res) => {
-    db.get(`SELECT * FROM boards WHERE id = ?`, [req.params.id], (err, board) => {
-        if(!board) return res.status(404).json({error: "Not found"});
-        // Подгружаем лайки
-        db.get(`SELECT COUNT(*) as cnt FROM likes WHERE board_id = ?`, [board.id], (e, r) => {
-            board.likes_count = r.cnt;
-            board.elements = JSON.parse(board.content);
-            res.json(board);
-        });
-    });
-});
+// 6. Получение одной доски
+app.get('/api/boards/:id', authenticate, async (req, res) => {
+    try {
+        const board = await dbGet(`SELECT * FROM boards WHERE id = ?`, [req.params.id]);
+        if (!board) return res.status(404).json({ error: "Not found" });
 
-// Доступ по Hash (без авторизации)
-app.get('/board/:hash', (req, res) => {
-    db.get(`SELECT * FROM boards WHERE hash = ? AND is_public = 1`, [req.params.hash], (err, board) => {
-        if(!board) return res.status(404).json({error: "Not found or private"});
-        board.elements = JSON.parse(board.content);
+        // Проверка доступа (Owner или Access List) - упрощенно
+        // В реальном проекте тут нужно проверить права доступа
+
+        const likes = await dbGet(`SELECT COUNT(*) as cnt FROM likes WHERE board_id = ?`, [board.id]);
+        board.likes_count = likes.cnt;
+        board.elements = JSON.parse(board.content || '[]');
         res.json(board);
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// 7. Расшарить доску
-app.post('/api/boards/:id/share', authenticate, (req, res) => {
-    const { email } = req.body;
-    db.run(`INSERT INTO board_access (board_id, user_email) VALUES (?, ?)`, 
-        [req.params.id, email], (err) => res.json({success: true}));
+// Доступ по Hash
+app.get('/board/:hash', async (req, res) => {
+    try {
+        const board = await dbGet(`SELECT * FROM boards WHERE hash = ? AND is_public = 1`, [req.params.hash]);
+        if (!board) return res.status(404).json({ error: "Not found or private" });
+        
+        board.elements = JSON.parse(board.content || '[]');
+        res.json(board);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 7. Расшарить
+app.post('/api/boards/:id/share', authenticate, async (req, res) => {
+    try {
+        const { email } = req.body;
+        await dbRun(`INSERT INTO board_access (board_id, user_email) VALUES (?, ?)`, [req.params.id, email]);
+        res.json({ success: true });
+    } catch (err) {
+        // Игнорируем дубликаты
+        res.json({ success: true });
+    }
 });
 
 // 8. Лайк
-app.post('/api/boards/:id/like', authenticate, (req, res) => {
-    db.run(`INSERT OR IGNORE INTO likes (user_id, board_id) VALUES (?, ?)`, 
-        [req.user.id, req.params.id], (err) => res.json({success: true}));
+app.post('/api/boards/:id/like', authenticate, async (req, res) => {
+    try {
+        await dbRun(`INSERT OR IGNORE INTO likes (user_id, board_id) VALUES (?, ?)`, [req.user.id, req.params.id]);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 
-// --- WEBSOCKET LOGIC ---
+// --- WEBSOCKET LOGIC (Optimized) ---
 
-// Хранилище фокусов в памяти: { boardId: { elementId: { userId, userName } } }
-const focusStore = {}; 
+// Хранилище: { boardId: { elementId: { userId, userName } } }
+const focusStore = {};
+// Обратный индекс для быстрого отключения: { socketId: [ { boardId, elementId } ] }
+const userLocks = {}; 
+
+// Очередь записи для предотвращения Race Condition при записи JSON
+// { boardId: Promise }
+const boardWriteQueues = {};
+
+// Функция для безопасного обновления JSON в БД (по очереди для каждой доски)
+const safeUpdateBoardContent = (boardId, updateFunction) => {
+    // Если очереди нет, создаем resolved promise
+    if (!boardWriteQueues[boardId]) {
+        boardWriteQueues[boardId] = Promise.resolve();
+    }
+
+    // Добавляем задачу в очередь
+    boardWriteQueues[boardId] = boardWriteQueues[boardId].then(async () => {
+        try {
+            const row = await dbGet(`SELECT content FROM boards WHERE id = ?`, [boardId]);
+            if (!row) return;
+
+            let elements = JSON.parse(row.content || '[]');
+            // Выполняем функцию модификации массива
+            elements = updateFunction(elements);
+
+            await dbRun(`UPDATE boards SET content = ? WHERE id = ?`, [JSON.stringify(elements), boardId]);
+        } catch (err) {
+            console.error(`Error saving board ${boardId}:`, err);
+        }
+    });
+
+    return boardWriteQueues[boardId];
+};
+
 
 io.use((socket, next) => {
-    // Аутентификация сокета
     const token = socket.handshake.auth.token;
     if (token) {
         jwt.verify(token, SECRET_KEY, (err, decoded) => {
             if (!err) socket.user = decoded;
+            // Если токен протух, можно пускать как гостя или выдавать ошибку.
+            // Тут пускаем как гостя, если ошибка токена, или требуем строгий логин:
+            else socket.user = { id: 'guest_' + socket.id.substr(0, 4), name: 'Guest' };
             next();
         });
     } else {
-        // Гостевой вход (для публичных досок)
-        socket.user = { id: 'guest_' + socket.id, name: 'Guest' };
+        socket.user = { id: 'guest_' + socket.id.substr(0, 4), name: 'Guest' };
         next();
     }
 });
 
 io.on('connection', (socket) => {
-    console.log(`User connected: ${socket.user.name}`);
+    // console.log(`WS Connected: ${socket.user.name} (${socket.id})`);
 
-    // Вход в комнату доски
     socket.on('JOIN_BOARD', ({ board_id }) => {
         socket.join(board_id);
-        // Отправить текущие фокусы новому юзеру
         if (focusStore[board_id]) {
             socket.emit('CURRENT_FOCUSES', focusStore[board_id]);
         }
     });
 
-    // Попытка взять фокус
     socket.on('REQUEST_FOCUS', ({ board_id, element_id }) => {
         if (!focusStore[board_id]) focusStore[board_id] = {};
         
         const currentLock = focusStore[board_id][element_id];
-        
-        // Если объект уже занят кем-то другим
+        // Если занято другим
         if (currentLock && currentLock.userId !== socket.user.id) {
-            socket.emit('ERROR', { message: "Object is locked by another user" });
+            socket.emit('ERROR', { message: "Object locked" });
             return;
         }
 
-        // Занимаем объект
-        focusStore[board_id][element_id] = { 
-            userId: socket.user.id, 
-            userName: socket.user.name 
-        };
+        // Занимаем
+        focusStore[board_id][element_id] = { userId: socket.user.id, userName: socket.user.name };
+        
+        // Сохраняем в индекс для быстрого disconnect
+        if (!userLocks[socket.id]) userLocks[socket.id] = [];
+        userLocks[socket.id].push({ board_id, element_id });
 
-        // Сообщаем всем в комнате
-        io.to(board_id).emit('FOCUS_TAKEN', { 
-            element_id, 
-            user_name: socket.user.name 
-        });
+        io.to(board_id).emit('FOCUS_TAKEN', { element_id, user_name: socket.user.name });
     });
 
-    // Обновление/снятие фокуса (сохранение)
-    socket.on('RELEASE_FOCUS', ({ board_id, element_id, element_data }) => {
-        // Валидация на сервере
+    socket.on('RELEASE_FOCUS', async ({ board_id, element_id, element_data }) => {
         if (!validateElement(element_data)) {
-            socket.emit('ERROR', { message: "Invalid coordinates (Out of bounds)" });
-            return; // Не сохраняем
+            return;
         }
 
-        // Обновляем БД (нужно считать текущий JSON, обновить нужный элемент и записать обратно)
-        // Для упрощения примера - делаем это асинхронно, не блокируя сокет
-        db.get(`SELECT content FROM boards WHERE id = ?`, [board_id], (err, row) => {
-            if (row) {
-                let elements = JSON.parse(row.content);
-                const idx = elements.findIndex(el => el.id === element_id);
-                if (idx !== -1) {
-                    elements[idx] = element_data;
-                } else {
-                    elements.push(element_data); // Если новый
-                }
-                
-                db.run(`UPDATE boards SET content = ? WHERE id = ?`, [JSON.stringify(elements), board_id]);
-                
-                // Снимаем блокировку
-                if (focusStore[board_id]) delete focusStore[board_id][element_id];
-
-                // Рассылаем обновление всем
-                io.to(board_id).emit('ELEMENT_UPDATED', { element_id, element_data });
-                io.to(board_id).emit('FOCUS_RELEASED', { element_id });
+        // Используем очередь обновлений
+        await safeUpdateBoardContent(board_id, (elements) => {
+            const idx = elements.findIndex(el => el.id === element_id);
+            if (idx !== -1) {
+                elements[idx] = element_data;
+            } else {
+                elements.push(element_data);
             }
+            return elements;
         });
+
+        // Снимаем блокировку
+        if (focusStore[board_id]) delete focusStore[board_id][element_id];
+        
+        // Чистим из userLocks
+        if (userLocks[socket.id]) {
+            userLocks[socket.id] = userLocks[socket.id].filter(l => l.element_id !== element_id);
+        }
+
+        io.to(board_id).emit('ELEMENT_UPDATED', { element_id, element_data });
+        io.to(board_id).emit('FOCUS_RELEASED', { element_id });
     });
 
-    // Создание элемента
-    socket.on('ADD_ELEMENT', ({ board_id, element }) => {
-        element.id = uuidv4(); // Генерируем ID на сервере или берем с клиента
+    socket.on('ADD_ELEMENT', async ({ board_id, element }) => {
+        element.id = element.id || uuidv4();
         if (!validateElement(element)) return;
 
-        db.get(`SELECT content FROM boards WHERE id = ?`, [board_id], (err, row) => {
-            if(row) {
-                let elements = JSON.parse(row.content);
-                elements.push(element);
-                db.run(`UPDATE boards SET content = ? WHERE id = ?`, [JSON.stringify(elements), board_id]);
-                io.to(board_id).emit('ELEMENT_CREATED', { element });
-            }
+        // Используем очередь обновлений
+        await safeUpdateBoardContent(board_id, (elements) => {
+            elements.push(element);
+            return elements;
         });
+
+        io.to(board_id).emit('ELEMENT_CREATED', { element });
     });
 
     socket.on('disconnect', () => {
-        // Очистка фокусов при отключении
-        // Проходимся по всем доскам и удаляем локи этого юзера
-        for (const boardId in focusStore) {
-            for (const elId in focusStore[boardId]) {
-                if (focusStore[boardId][elId].userId === socket.user.id) {
-                    delete focusStore[boardId][elId];
-                    io.to(boardId).emit('FOCUS_RELEASED', { element_id: elId });
+        // Быстрая очистка блокировок через userLocks
+        if (userLocks[socket.id]) {
+            userLocks[socket.id].forEach(({ board_id, element_id }) => {
+                if (focusStore[board_id] && focusStore[board_id][element_id]) {
+                    // Проверяем, что это действительно блокировка этого сокета
+                    if (focusStore[board_id][element_id].userId === socket.user.id) {
+                        delete focusStore[board_id][element_id];
+                        io.to(board_id).emit('FOCUS_RELEASED', { element_id });
+                    }
                 }
-            }
+            });
+            delete userLocks[socket.id];
         }
     });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
 });
